@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import io
-import time
+import os
+import tempfile
+import json
+import google.generativeai as genai
 
 st.set_page_config(page_title="공동주택 관경 적합성 검토기", layout="wide")
 
@@ -20,7 +23,6 @@ pipe_data = {
     '40S':  {'inner_d': 4.21,  'ball': 0.30, 'el90': 1.40,  'el45': 0.70, 'tee': 2.10,  'tee14': 0.70,  'red12': 0.45}
 }
 
-# 기본 배관 공사 단가 (미니 계산기 초기값용, 원/m)
 default_unit_costs = {
     '400P': 350000, '355P': 280000, '280P': 200000, '225P': 150000,
     '160P': 100000, '90P': 60000, '65S': 50000, '50S': 40000, '40S': 35000
@@ -44,18 +46,17 @@ def get_sim_rate(n):
     elif n <= 300: return 0.29
     else: return 0.28
 
-# 상태 초기화
 if 'reset_data' not in st.session_state:
     st.session_state['reset_data'] = False
-if 'ai_extracted' not in st.session_state:
-    st.session_state['ai_extracted'] = False
+if 'ai_df' not in st.session_state:
+    st.session_state['ai_df'] = pd.DataFrame()
 
 input_columns = ['구간', '세대수(세대)', '선정관경', '직관길이(m)', '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)']
 empty_df = pd.DataFrame(columns=input_columns)
 df = empty_df.copy()
 
 # ==========================================
-# 좌측 사이드바: 탭 구성 및 데이터 로드
+# 좌측 사이드바: 탭 구성 및 데이터 로드 (AI 탑재)
 # ==========================================
 with st.sidebar:
     st.title("메뉴 이동")
@@ -94,28 +95,58 @@ with st.sidebar:
                 ], columns=input_columns)
 
     elif menu == "🤖 2. 관경 산출 고도화 (도면 AI)":
-        st.header("⚙️ AI 도면 분석기 (시연용)")
-        uploaded_pdf = st.file_uploader("도면 업로드 (PDF, PNG, JPG)", type=['pdf', 'png', 'jpg'])
+        st.header("⚙️ AI 도면 분석기 (Gemini 1.5 Pro)")
+        # API Key 입력창 추가
+        api_key = st.text_input("🔑 발급받은 Gemini API Key 입력", type="password")
         
-        if uploaded_pdf:
-            st.info(f"📄 업로드된 파일: **{uploaded_pdf.name}**")
-            if st.button("🤖 AI 도면 분석 시작 (추출 시뮬레이션)"):
-                st.session_state['ai_extracted'] = True
+        uploaded_pdf = st.file_uploader("도면 업로드 (PDF)", type=['pdf'])
+        
+        if st.button("🤖 도면 분석 시작 (실제 AI 호출)"):
+            if not api_key:
+                st.error("API Key를 먼저 입력해 주세요!")
+            elif not uploaded_pdf:
+                st.error("도면 PDF 파일을 업로드해 주세요!")
+            else:
                 st.session_state['reset_data'] = False
-                with st.spinner("AI가 도면의 배관 경로, 관경 텍스트, 엘보/티 개수를 분석 중입니다..."):
-                    time.sleep(2.5) # AI가 분석하는 척 대기
-                    st.toast("✅ 도면 분석 완료! 아래 에디터에 물량이 자동 입력되었습니다.")
-                    
-        # 가상 데이터(Mock) 주입
-        if st.session_state['ai_extracted'] and uploaded_pdf and not st.session_state['reset_data']:
-            df = pd.DataFrame([
-                ["A-B", 1740, "400P", 64.0, 1, 1, 0, 0, 0, 0],
-                ["B-C", 1740, "280P", 17.0, 0, 2, 0, 1, 0, 0],
-                ["C-D", 1740, "225P", 132.0, 0, 3, 0, 0, 0, 1]
-            ], columns=input_columns)
-        else:
-            if not uploaded_pdf:
-                st.warning("도면 파일을 업로드해 주세요.")
+                # Gemini API 키 설정
+                genai.configure(api_key=api_key)
+                
+                with st.spinner("구글 AI가 도면을 읽고 물량을 추출 중입니다. (약 15~30초 소요)"):
+                    try:
+                        # 1. 업로드된 PDF를 임시 파일로 저장
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                            tmp.write(uploaded_pdf.getvalue())
+                            tmp_path = tmp.name
+                            
+                        # 2. 구글 서버에 파일 업로드
+                        sample_file = genai.upload_file(path=tmp_path)
+                        
+                        # 3. 모델 선택 및 프롬프트 명령 하달
+                        model = genai.GenerativeModel('gemini-1.5-pro')
+                        prompt = """
+                        이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
+                        결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
+                        필요한 Key: '구간'(예: A-B), '세대수(세대)'(기본 1740), '선정관경'(예: 400P, 280P 등 P나 S를 붙임), '직관길이(m)'(숫자), '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)'.
+                        값을 모르면 0으로 채우세요.
+                        """
+                        response = model.generate_content([sample_file, prompt])
+                        
+                        # 4. AI 응답결과(JSON)를 데이터프레임으로 변환
+                        raw_text = response.text.replace('```json', '').replace('```', '').strip()
+                        ai_data = json.loads(raw_text)
+                        
+                        st.session_state['ai_df'] = pd.DataFrame(ai_data)
+                        
+                        # 5. 서버에 올린 임시 파일 삭제 (보안 유지)
+                        genai.delete_file(sample_file.name)
+                        os.remove(tmp_path)
+                        st.toast("✅ AI 도면 분석 성공! 데이터가 에디터에 연동되었습니다.")
+                        
+                    except Exception as e:
+                        st.error(f"AI 분석 중 오류가 발생했습니다. 다시 시도해 주세요.\n\n에러내용: {e}")
+                        
+        if not st.session_state['ai_df'].empty and not st.session_state['reset_data']:
+            df = st.session_state['ai_df'][input_columns]
 
 # ==========================================
 # 공통 UI: 메인 화면 (탭 1, 2 공통)
@@ -123,11 +154,10 @@ with st.sidebar:
 if menu == "📊 1. 관경 산출 (엑셀/수기)":
     st.title("🏢 공동주택 도시가스 관경 사전 검토기")
 else:
-    st.title("🚀 AI 도면 자동 인식 및 관경 산출 (가상 추출)")
+    st.title("🚀 AI 도면 자동 인식 및 관경 산출 (Gemini API)")
 
 st.markdown("---")
 
-# 1. 세대당 가스소비량 설정
 st.markdown("### 1️⃣ 세대당 가스소비량 설정")
 col1, col2, col3 = st.columns(3)
 boiler_kcal = col1.number_input("보일러 발열량 (kcal/hr)", value=22100, step=100)
@@ -137,13 +167,12 @@ col3.info(f"💡 산출된 세대당 유량: **{household_flow:.4f} ㎥/hr**")
 
 st.markdown("---")
 
-# 2. 도면 물량 직접 입력 (에디터)
 st.markdown("### 2️⃣ 구간별 도면 물량 데이터 에디터")
 col_btn, _ = st.columns([1, 4])
 with col_btn:
     if st.button("🗑️ 표 전체 지우기 (초기화)"):
         st.session_state['reset_data'] = True
-        st.session_state['ai_extracted'] = False
+        st.session_state['ai_df'] = pd.DataFrame()
         st.rerun()
 
 df = df.fillna(0) 
@@ -160,18 +189,14 @@ edited_df = st.data_editor(
     }
 )
 
-# 유령 행 제거 완벽 필터링
 edited_df['구간'] = edited_df['구간'].astype(str).str.strip() 
 edited_df = edited_df[~edited_df['구간'].isin(['', '0', 'nan', 'None'])] 
 edited_df = edited_df.fillna(0) 
 
-# 변수 초기화
 total_actual_drop = 0
 result_data = []
 
-# 백엔드 계산 로직
 if not edited_df.empty:
-    # 1단계: 관상당합계 및 관길이 
     for idx, row in edited_df.iterrows():
         pipe_type = str(row['선정관경']).strip()
         if pipe_type not in pipe_data: pipe_type = '400P' 
@@ -189,7 +214,6 @@ if not edited_df.empty:
 
     grand_total_length = edited_df['관길이(m)'].sum()
 
-    # 2단계: 유량, 압력손실 계산
     for idx, row in edited_df.iterrows():
         pipe_type = str(row['선정관경']).strip()
         if pipe_type not in pipe_data: pipe_type = '400P'
