@@ -116,7 +116,8 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"API 키 인증 실패: {e}")
                 
-        uploaded_pdf = st.file_uploader("도면 업로드 (PDF 한정)", type=['pdf'])
+        # 🚀 [수정됨] 파일 업로더 확장 (PDF, DWG, 이미지 지원)
+        uploaded_pdf = st.file_uploader("도면 업로드 (PDF, DWG, PNG, JPG 지원)", type=['pdf', 'dwg', 'png', 'jpg', 'jpeg'])
         
         if st.button("🤖 도면 분석 시작 (실제 AI 호출)"):
             if not api_key:
@@ -124,13 +125,15 @@ with st.sidebar:
             elif not selected_model:
                 st.warning("사용 가능한 AI 모델을 선택해 주세요!")
             elif not uploaded_pdf:
-                st.warning("도면 PDF 파일을 업로드해 주세요!")
+                st.warning("도면 파일을 업로드해 주세요!")
             else:
                 st.session_state['reset_data'] = False
                 
-                with st.spinner(f"구글 AI({selected_model})가 도면(PDF)을 분석 중입니다..."):
+                with st.spinner(f"구글 AI({selected_model})가 업로드된 도면을 분석 중입니다..."):
                     try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                        # 🚀 [수정됨] 업로드된 파일의 확장자를 그대로 유지하여 임시 파일 생성
+                        file_ext = os.path.splitext(uploaded_pdf.name)[1].lower()
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
                             tmp.write(uploaded_pdf.getvalue())
                             tmp_path = tmp.name
                             
@@ -141,7 +144,7 @@ with st.sidebar:
                             sample_file = genai.get_file(sample_file.name)
                         
                         if sample_file.state.name == "FAILED":
-                            st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
+                            st.error("구글 서버에서 파일을 처리하는 데 실패했습니다. (DWG 원본 파일의 경우 변환 오류일 수 있으니 캡처 이미지를 권장합니다.)")
                         else:
                             model = genai.GenerativeModel(selected_model)
                             prompt = """
@@ -167,7 +170,7 @@ with st.sidebar:
                         os.remove(tmp_path)
                         
                     except Exception as e:
-                        st.error(f"AI 분석 중 오류가 발생했습니다. (에러내용: {e})")
+                        st.error(f"AI 분석 중 오류가 발생했습니다. DWG 인식 오류일 경우 캡처 이미지를 올려보세요. (에러내용: {e})")
                         
         if not st.session_state['ai_df'].empty and not st.session_state['reset_data']:
             df = st.session_state['ai_df'][input_columns]
@@ -182,7 +185,6 @@ else:
 
 st.markdown("---")
 
-# 🚀 [신규 추가] 0. 기본 검토 조건 설정 (정압기 위치 및 배관 재질)
 st.markdown("### 0️⃣ 기본 검토 조건 설정")
 col_gov, col_pipe = st.columns(2)
 
@@ -198,13 +200,11 @@ pipe_mat = col_pipe.radio(
     horizontal=True
 )
 
-# 정압기 위치에 따른 허용압력 동적 세팅
 if "단지 내" in gov_loc:
     STANDARD_PRESSURE = 0.5000
 else:
     STANDARD_PRESSURE = 0.3000
 
-# 배관 재질에 따른 에디터 드롭다운 옵션 필터링
 if "PE" in pipe_mat and "SPPG" not in pipe_mat:
     available_pipes = [k for k in pipe_data.keys() if 'P' in k]
 elif "SPPG" in pipe_mat and "PE" not in pipe_mat:
@@ -239,7 +239,6 @@ edited_df = st.data_editor(
     use_container_width=True,
     hide_index=False,
     column_config={
-        # 🚀 선택한 주 배관 재질에 따라 드롭다운 옵션이 달라집니다.
         "선정관경": st.column_config.SelectboxColumn("선정관경", options=available_pipes),
         "직관길이(m)": st.column_config.NumberColumn("직관길이(m)", format="%.2f"),
         "세대수(세대)": st.column_config.NumberColumn("세대수(세대)", format="%d"),
@@ -257,7 +256,7 @@ if not edited_df.empty:
     for idx, row in edited_df.iterrows():
         pipe_type = str(row['선정관경']).strip()
         if pipe_type not in pipe_data: 
-            pipe_type = available_pipes[0] if available_pipes else '400P' # 예외 처리 안전장치
+            pipe_type = available_pipes[0] if available_pipes else '400P'
             
         p_info = pipe_data.get(pipe_type)
         eq_length = (float(row['볼밸브(개)']) * p_info['ball']) + \
