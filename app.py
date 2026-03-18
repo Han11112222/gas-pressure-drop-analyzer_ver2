@@ -10,7 +10,7 @@ import google.generativeai as genai
 st.set_page_config(page_title="공동주택 관경 적합성 검토기", layout="wide")
 
 STANDARD_CAL = 10145 
-STANDARD_PRESSURE = 0.3000 
+# STANDARD_PRESSURE는 이제 UI 선택에 따라 동적으로 변합니다.
 
 pipe_data = {
     '400P': {'inner_d': 32.92, 'ball': 2.36, 'el90': 9.53, 'el45': 4.76, 'tee': 28.50, 'tee14': 9.53, 'red12': 4.05},
@@ -93,19 +93,16 @@ with st.sidebar:
                 df = pd.DataFrame([["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0]], columns=input_columns)
 
     elif menu == "🤖 2. 관경 산출 고도화 (도면 AI)":
-        st.header("⚙️ AI 도면 분석기")
+        st.header("⚙️ AI 도면 분석기 (Gemini API)")
         api_key = st.text_input("🔑 발급받은 Gemini API Key 입력", type="password")
         
-        # 🚀 에러 원천 차단: API 키가 입력되면 구글 서버에 '사용 가능한 모델 목록'을 먼저 요청함
         selected_model = None
         if api_key:
             try:
                 genai.configure(api_key=api_key)
-                # 현재 키로 접근 가능한 모델만 필터링해서 드롭다운으로 표시
                 available_models = [m.name.replace('models/', '') for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                 
                 if available_models:
-                    # '1.5-flash'나 '1.5-pro'가 있으면 기본으로 선택되게 설정
                     default_idx = 0
                     for i, name in enumerate(available_models):
                         if '1.5-flash' in name:
@@ -113,7 +110,6 @@ with st.sidebar:
                             break
                         elif '1.5-pro' in name and default_idx == 0:
                             default_idx = i
-                    
                     selected_model = st.selectbox("🤖 분석에 사용할 AI 모델 (자동 검색됨)", available_models, index=default_idx)
                 else:
                     st.error("이 API 키로 접근 가능한 모델이 없습니다. 키를 다시 확인해 주세요.")
@@ -147,7 +143,6 @@ with st.sidebar:
                         if sample_file.state.name == "FAILED":
                             st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
                         else:
-                            # 사용자가 직접 선택한(검증된) 모델 이름으로 명령 하달
                             model = genai.GenerativeModel(selected_model)
                             prompt = """
                             이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
@@ -157,7 +152,6 @@ with st.sidebar:
                             """
                             response = model.generate_content([sample_file, prompt])
                             
-                            # JSON 마크다운 껍데기 벗겨내기
                             raw_text = response.text.strip()
                             if raw_text.startswith("```json"):
                                 raw_text = raw_text[7:]
@@ -188,6 +182,38 @@ else:
 
 st.markdown("---")
 
+# 🚀 [신규 추가] 0. 기본 검토 조건 설정 (정압기 위치 및 배관 재질)
+st.markdown("### 0️⃣ 기본 검토 조건 설정")
+col_gov, col_pipe = st.columns(2)
+
+gov_loc = col_gov.radio(
+    "📍 지역정압기 위치 (허용압력 기준 결정)", 
+    ["단지 외부 (0.3 kPa 이내)", "단지 내 (0.5 kPa 이내)"],
+    horizontal=True
+)
+
+pipe_mat = col_pipe.radio(
+    "🔤 주 배관 재질 선택", 
+    ["PE (폴리에틸렌관)", "SPPG (가스용 강관)", "PE + SPPG 혼합"],
+    horizontal=True
+)
+
+# 정압기 위치에 따른 허용압력 동적 세팅
+if "단지 내" in gov_loc:
+    STANDARD_PRESSURE = 0.5000
+else:
+    STANDARD_PRESSURE = 0.3000
+
+# 배관 재질에 따른 에디터 드롭다운 옵션 필터링
+if "PE" in pipe_mat and "SPPG" not in pipe_mat:
+    available_pipes = [k for k in pipe_data.keys() if 'P' in k]
+elif "SPPG" in pipe_mat and "PE" not in pipe_mat:
+    available_pipes = [k for k in pipe_data.keys() if 'S' in k]
+else:
+    available_pipes = list(pipe_data.keys())
+
+st.markdown("---")
+
 st.markdown("### 1️⃣ 세대당 가스소비량 설정")
 col1, col2, col3 = st.columns(3)
 boiler_kcal = col1.number_input("보일러 발열량 (kcal/hr)", value=22100, step=100)
@@ -213,7 +239,8 @@ edited_df = st.data_editor(
     use_container_width=True,
     hide_index=False,
     column_config={
-        "선정관경": st.column_config.SelectboxColumn("선정관경", options=list(pipe_data.keys())),
+        # 🚀 선택한 주 배관 재질에 따라 드롭다운 옵션이 달라집니다.
+        "선정관경": st.column_config.SelectboxColumn("선정관경", options=available_pipes),
         "직관길이(m)": st.column_config.NumberColumn("직관길이(m)", format="%.2f"),
         "세대수(세대)": st.column_config.NumberColumn("세대수(세대)", format="%d"),
     }
@@ -229,7 +256,8 @@ result_data = []
 if not edited_df.empty:
     for idx, row in edited_df.iterrows():
         pipe_type = str(row['선정관경']).strip()
-        if pipe_type not in pipe_data: pipe_type = '400P' 
+        if pipe_type not in pipe_data: 
+            pipe_type = available_pipes[0] if available_pipes else '400P' # 예외 처리 안전장치
             
         p_info = pipe_data.get(pipe_type)
         eq_length = (float(row['볼밸브(개)']) * p_info['ball']) + \
@@ -246,7 +274,8 @@ if not edited_df.empty:
 
     for idx, row in edited_df.iterrows():
         pipe_type = str(row['선정관경']).strip()
-        if pipe_type not in pipe_data: pipe_type = '400P'
+        if pipe_type not in pipe_data: 
+            pipe_type = available_pipes[0] if available_pipes else '400P'
             
         p_info = pipe_data.get(pipe_type)
         inner_d = p_info['inner_d']
