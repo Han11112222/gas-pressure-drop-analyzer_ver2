@@ -116,7 +116,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"API 키 인증 실패: {e}")
                 
-        # 🚀 [수정됨] 파일 업로더 확장 (PDF, DWG, 이미지 지원)
+        # 🚀 파일 업로더에서 DWG도 허용하지만, 버튼 클릭 시 걸러냅니다.
         uploaded_pdf = st.file_uploader("도면 업로드 (PDF, DWG, PNG, JPG 지원)", type=['pdf', 'dwg', 'png', 'jpg', 'jpeg'])
         
         if st.button("🤖 도면 분석 시작 (실제 AI 호출)"):
@@ -127,53 +127,69 @@ with st.sidebar:
             elif not uploaded_pdf:
                 st.warning("도면 파일을 업로드해 주세요!")
             else:
-                st.session_state['reset_data'] = False
-                
-                with st.spinner(f"구글 AI({selected_model})가 업로드된 도면을 분석 중입니다..."):
-                    try:
-                        # 🚀 [수정됨] 업로드된 파일의 확장자를 그대로 유지하여 임시 파일 생성
-                        file_ext = os.path.splitext(uploaded_pdf.name)[1].lower()
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                            tmp.write(uploaded_pdf.getvalue())
-                            tmp_path = tmp.name
-                            
-                        sample_file = genai.upload_file(path=tmp_path)
-                        
-                        while sample_file.state.name == "PROCESSING":
-                            time.sleep(2)
-                            sample_file = genai.get_file(sample_file.name)
-                        
-                        if sample_file.state.name == "FAILED":
-                            st.error("구글 서버에서 파일을 처리하는 데 실패했습니다. (DWG 원본 파일의 경우 변환 오류일 수 있으니 캡처 이미지를 권장합니다.)")
-                        else:
-                            model = genai.GenerativeModel(selected_model)
-                            prompt = """
-                            이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
-                            결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
-                            필요한 Key: '구간'(예: A-B), '세대수(세대)'(기본 1740), '선정관경'(예: 400P, 280P 등 P나 S를 붙임), '직관길이(m)'(숫자), '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)'.
-                            값을 모르면 0으로 채우세요.
-                            """
-                            response = model.generate_content([sample_file, prompt])
-                            
-                            raw_text = response.text.strip()
-                            if raw_text.startswith("```json"):
-                                raw_text = raw_text[7:]
-                            if raw_text.endswith("```"):
-                                raw_text = raw_text[:-3]
-                            raw_text = raw_text.strip()
+                # 🚀 [추가됨] DWG 파일 업로드 시 명확한 안내 후 차단
+                file_ext = os.path.splitext(uploaded_pdf.name)[1].lower()
+                if file_ext == '.dwg':
+                    st.error("🚨 구글 AI 서버는 오토캐드 원본(.dwg) 파일의 직접 판독을 지원하지 않습니다. 캐드 화면에서 분석을 원하시는 부분을 **화면 캡처(PNG/JPG)** 하시거나 **PDF로 인쇄**하여 올려주시면 가장 쾌속으로 정확하게 분석됩니다!")
+                else:
+                    st.session_state['reset_data'] = False
+                    
+                    with st.spinner(f"구글 AI({selected_model})가 업로드된 도면을 꼼꼼하게 분석 중입니다..."):
+                        try:
+                            # 🚀 [추가됨] 확장자에 맞는 명확한 Mime Type 지정
+                            mime_type_map = {
+                                '.pdf': 'application/pdf',
+                                '.png': 'image/png',
+                                '.jpg': 'image/jpeg',
+                                '.jpeg': 'image/jpeg'
+                            }
+                            target_mime_type = mime_type_map.get(file_ext, 'application/pdf')
 
-                            ai_data = json.loads(raw_text)
-                            st.session_state['ai_df'] = pd.DataFrame(ai_data)
-                            st.toast(f"✅ AI 도면 분석 성공! ({selected_model} 적용됨)")
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                                tmp.write(uploaded_pdf.getvalue())
+                                tmp_path = tmp.name
+                                
+                            # Mime type을 강제로 세팅하여 400 에러 원천 차단
+                            sample_file = genai.upload_file(path=tmp_path, mime_type=target_mime_type)
                             
-                        genai.delete_file(sample_file.name)
-                        os.remove(tmp_path)
-                        
-                    except Exception as e:
-                        st.error(f"AI 분석 중 오류가 발생했습니다. DWG 인식 오류일 경우 캡처 이미지를 올려보세요. (에러내용: {e})")
-                        
-        if not st.session_state['ai_df'].empty and not st.session_state['reset_data']:
-            df = st.session_state['ai_df'][input_columns]
+                            while sample_file.state.name == "PROCESSING":
+                                time.sleep(2)
+                                sample_file = genai.get_file(sample_file.name)
+                            
+                            if sample_file.state.name == "FAILED":
+                                st.error("구글 서버에서 파일을 처리하는 데 실패했습니다.")
+                            else:
+                                model = genai.GenerativeModel(selected_model)
+                                # 🚀 [추가됨] 정확도를 극대화하기 위한 강력한 프롬프트 지시어 적용
+                                prompt = """
+                                당신은 도시가스 배관 설계 및 물량 산출의 최고 전문가입니다. 
+                                업로드된 도면(또는 이미지)은 아파트 가스배관 관경산출 도면입니다. 도면의 화질이나 해상도가 다소 낮더라도, 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류 기호를 최대한 면밀하게 추론하고 분석하여 각 구간별 물량을 추출하세요.
+                                
+                                결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
+                                필요한 Key: '구간'(예: A-B), '세대수(세대)'(기본 1740), '선정관경'(예: 400P, 280P 등 P나 S를 붙임), '직관길이(m)'(숫자), '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)'.
+                                값을 모르면 0으로 채우세요.
+                                """
+                                response = model.generate_content([sample_file, prompt])
+                                
+                                raw_text = response.text.strip()
+                                if raw_text.startswith("```json"):
+                                    raw_text = raw_text[7:]
+                                if raw_text.endswith("```"):
+                                    raw_text = raw_text[:-3]
+                                raw_text = raw_text.strip()
+
+                                ai_data = json.loads(raw_text)
+                                st.session_state['ai_df'] = pd.DataFrame(ai_data)
+                                st.toast(f"✅ AI 도면 분석 성공! ({selected_model} 적용됨)")
+                                
+                            genai.delete_file(sample_file.name)
+                            os.remove(tmp_path)
+                            
+                        except Exception as e:
+                            st.error(f"AI 분석 중 오류가 발생했습니다. (에러내용: {e})")
+                            
+            if not st.session_state['ai_df'].empty and not st.session_state['reset_data']:
+                df = st.session_state['ai_df'][input_columns]
 
 # ==========================================
 # 공통 UI: 메인 화면
