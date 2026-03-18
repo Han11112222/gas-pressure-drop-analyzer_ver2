@@ -108,7 +108,7 @@ with st.sidebar:
                 
                 with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 1~2분 정도 소요될 수 있습니다..."):
                     try:
-                        # 1. 대용량 파일 전용: 임시 파일로 저장
+                        # 1. 임시 파일로 저장
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                             tmp.write(uploaded_pdf.getvalue())
                             tmp_path = tmp.name
@@ -116,7 +116,7 @@ with st.sidebar:
                         # 2. 대용량 통로(File API)로 구글 서버에 업로드
                         sample_file = genai.upload_file(path=tmp_path)
                         
-                        # 3. [핵심 방어코드] PDF 처리가 끝날 때까지 대기
+                        # 3. PDF 처리가 끝날 때까지 대기
                         while sample_file.state.name == "PROCESSING":
                             time.sleep(2)
                             sample_file = genai.get_file(sample_file.name)
@@ -124,8 +124,8 @@ with st.sidebar:
                         if sample_file.state.name == "FAILED":
                             st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
                         else:
-                            # 4. 모델 선택 및 프롬프트 명령
-                            model = genai.GenerativeModel('gemini-1.5-pro')
+                            # 4. 모델 이름 오류 수정 (gemini-1.5-pro -> gemini-1.5-pro-latest)
+                            model = genai.GenerativeModel('gemini-1.5-pro-latest')
                             prompt = """
                             이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
                             결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
