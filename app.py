@@ -4,6 +4,7 @@ import io
 import os
 import tempfile
 import json
+import time
 import google.generativeai as genai
 
 st.set_page_config(page_title="공동주택 관경 적합성 검토기", layout="wide")
@@ -56,7 +57,7 @@ empty_df = pd.DataFrame(columns=input_columns)
 df = empty_df.copy()
 
 # ==========================================
-# 좌측 사이드바: 탭 구성 및 데이터 로드 (AI 탑재)
+# 좌측 사이드바
 # ==========================================
 with st.sidebar:
     st.title("메뉴 이동")
@@ -89,17 +90,12 @@ with st.sidebar:
                 except Exception:
                     df = pd.DataFrame([["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0]], columns=input_columns)
             else:
-                df = pd.DataFrame([
-                    ["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0],
-                    ["B-C", 1740, "400P", 94.0, 0, 2, 0, 0, 0, 0]
-                ], columns=input_columns)
+                df = pd.DataFrame([["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0]], columns=input_columns)
 
     elif menu == "🤖 2. 관경 산출 고도화 (도면 AI)":
         st.header("⚙️ AI 도면 분석기 (Gemini 1.5 Pro)")
-        # API Key 입력창 추가
         api_key = st.text_input("🔑 발급받은 Gemini API Key 입력", type="password")
-        
-        uploaded_pdf = st.file_uploader("도면 업로드 (PDF)", type=['pdf'])
+        uploaded_pdf = st.file_uploader("도면 업로드 (PDF 한정)", type=['pdf'])
         
         if st.button("🤖 도면 분석 시작 (실제 AI 호출)"):
             if not api_key:
@@ -108,48 +104,54 @@ with st.sidebar:
                 st.error("도면 PDF 파일을 업로드해 주세요!")
             else:
                 st.session_state['reset_data'] = False
-                # Gemini API 키 설정
                 genai.configure(api_key=api_key)
                 
-                with st.spinner("구글 AI가 도면을 읽고 물량을 추출 중입니다. (약 15~30초 소요)"):
+                with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 1~2분 정도 소요될 수 있습니다..."):
                     try:
-                        # 1. 업로드된 PDF를 임시 파일로 저장
+                        # 1. 대용량 파일 전용: 임시 파일로 저장
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                             tmp.write(uploaded_pdf.getvalue())
                             tmp_path = tmp.name
                             
-                        # 2. 구글 서버에 파일 업로드
+                        # 2. 대용량 통로(File API)로 구글 서버에 업로드
                         sample_file = genai.upload_file(path=tmp_path)
                         
-                        # 3. 모델 선택 및 프롬프트 명령 하달
-                        model = genai.GenerativeModel('gemini-1.5-pro')
-                        prompt = """
-                        이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
-                        결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
-                        필요한 Key: '구간'(예: A-B), '세대수(세대)'(기본 1740), '선정관경'(예: 400P, 280P 등 P나 S를 붙임), '직관길이(m)'(숫자), '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)'.
-                        값을 모르면 0으로 채우세요.
-                        """
-                        response = model.generate_content([sample_file, prompt])
+                        # 3. [핵심 방어코드] PDF 처리가 끝날 때까지 대기
+                        while sample_file.state.name == "PROCESSING":
+                            time.sleep(2)
+                            sample_file = genai.get_file(sample_file.name)
                         
-                        # 4. AI 응답결과(JSON)를 데이터프레임으로 변환
-                        raw_text = response.text.replace('```json', '').replace('```', '').strip()
-                        ai_data = json.loads(raw_text)
-                        
-                        st.session_state['ai_df'] = pd.DataFrame(ai_data)
-                        
-                        # 5. 서버에 올린 임시 파일 삭제 (보안 유지)
+                        if sample_file.state.name == "FAILED":
+                            st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
+                        else:
+                            # 4. 모델 선택 및 프롬프트 명령
+                            model = genai.GenerativeModel('gemini-1.5-pro')
+                            prompt = """
+                            이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
+                            결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
+                            필요한 Key: '구간'(예: A-B), '세대수(세대)'(기본 1740), '선정관경'(예: 400P, 280P 등 P나 S를 붙임), '직관길이(m)'(숫자), '볼밸브(개)', '90도엘보(개)', '45도엘보(개)', '동경티(개)', '1/4축소티(개)', '1/2레듀샤(개)'.
+                            값을 모르면 0으로 채우세요.
+                            """
+                            response = model.generate_content([sample_file, prompt])
+                            
+                            # 5. 응답결과 파싱
+                            raw_text = response.text.replace('```json', '').replace('```', '').strip()
+                            ai_data = json.loads(raw_text)
+                            st.session_state['ai_df'] = pd.DataFrame(ai_data)
+                            st.toast("✅ AI 도면 분석 성공! 데이터가 에디터에 연동되었습니다.")
+                            
+                        # 6. 보안 파기: 서버에 올린 임시 파일 즉시 삭제
                         genai.delete_file(sample_file.name)
                         os.remove(tmp_path)
-                        st.toast("✅ AI 도면 분석 성공! 데이터가 에디터에 연동되었습니다.")
                         
                     except Exception as e:
-                        st.error(f"AI 분석 중 오류가 발생했습니다. 다시 시도해 주세요.\n\n에러내용: {e}")
+                        st.error(f"AI 분석 중 오류가 발생했습니다. (에러내용: {e})")
                         
         if not st.session_state['ai_df'].empty and not st.session_state['reset_data']:
             df = st.session_state['ai_df'][input_columns]
 
 # ==========================================
-# 공통 UI: 메인 화면 (탭 1, 2 공통)
+# 공통 UI: 메인 화면
 # ==========================================
 if menu == "📊 1. 관경 산출 (엑셀/수기)":
     st.title("🏢 공동주택 도시가스 관경 사전 검토기")
@@ -248,7 +250,7 @@ result_df = pd.DataFrame(result_data)
 st.markdown("---")
 
 # ==========================================
-# 3. 최종 결과 표 & 진단 메시지 & 엑셀 다운로드
+# 3. 최종 결과 표
 # ==========================================
 status_msg = ""
 diagnosis_msg = ""
@@ -279,17 +281,10 @@ def convert_df_to_excel(df, status, diagnosis):
     return output.getvalue()
 
 col_title, col_download = st.columns([8, 2])
-with col_title:
-    st.markdown("### 3️⃣ 최종 관경산출표")
+with col_title: st.markdown("### 3️⃣ 최종 관경산출표")
 with col_download:
     if not result_df.empty:
-        st.download_button(
-            label="📥 엑셀파일 다운로드 (판정포함)",
-            data=convert_df_to_excel(result_df, status_msg, diagnosis_msg),
-            file_name="최종관경산출결과.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        st.download_button("📥 엑셀 다운로드", data=convert_df_to_excel(result_df, status_msg, diagnosis_msg), file_name="최종관경산출.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 st.dataframe(
     result_df,
@@ -301,9 +296,9 @@ st.dataframe(
         "동시사용률": st.column_config.NumberColumn("동시사용률", format="%.2f"),
         "직관길이(m)": st.column_config.NumberColumn("직관길이(m)", format="%,.2f"),
         "관상당합계": st.column_config.NumberColumn("관상당합계", format="%,.2f"),
-        "관길이(m)": st.column_config.NumberColumn("관길이(m)\n(직관+관상당)", format="%,.2f"),
-        "실_압력손실(kPa)": st.column_config.NumberColumn("실_압력손실(kPa)\n(실제 지출)", format="%.4f"),
-        "구간_허용압력(kPa)": st.column_config.NumberColumn("구간 허용압력(kPa)\n(쪼개진 예산)", format="%.4f"),
+        "관길이(m)": st.column_config.NumberColumn("관길이(m)", format="%,.2f"),
+        "실_압력손실(kPa)": st.column_config.NumberColumn("실_압력손실(kPa)", format="%.4f"),
+        "구간_허용압력(kPa)": st.column_config.NumberColumn("구간 허용압력(kPa)", format="%.4f"),
     }
 )
 
@@ -312,31 +307,21 @@ col1, col2, col3 = st.columns([1, 1, 2])
 with col1: st.metric("실압력 손실 (kPa)", f"{total_actual_drop:.4f}")
 with col2: st.metric("허용압력 손실 (kPa)", f"{STANDARD_PRESSURE:.4f}")
 with col3:
-    if total_actual_drop == 0:
-        st.info("데이터를 입력해 주세요.")
+    if total_actual_drop == 0: st.info("데이터를 입력해 주세요.")
     elif total_actual_drop <= STANDARD_PRESSURE:
         st.markdown("""<div style="background-color:#d4edda; padding:20px; border-radius:10px; text-align:center;"><h2 style="color:#155724; margin:0;">✅ 적 합 (공사 불필요)</h2></div>""", unsafe_allow_html=True)
     else:
         st.markdown("""<div style="background-color:#f8d7da; padding:20px; border-radius:10px; text-align:center;"><h2 style="color:#721c24; margin:0;">🚨 부 적 합 (관경 확대 요망)</h2></div>""", unsafe_allow_html=True)
-        if diagnosis_msg:
-            st.markdown(f"""<div style="margin-top:15px; padding:15px; background-color:#fff3cd; border-left:5px solid #ffc107; color:#856404;"><strong>{diagnosis_msg}</strong></div>""", unsafe_allow_html=True)
+        if diagnosis_msg: st.markdown(f"""<div style="margin-top:15px; padding:15px; background-color:#fff3cd; border-left:5px solid #ffc107; color:#856404;"><strong>{diagnosis_msg}</strong></div>""", unsafe_allow_html=True)
 
-# ==========================================
-# 부록: 공사 예상 비용 추산기 (부적합 시에만 노출)
-# ==========================================
+# 공사 예상 비용 추산기 (부적합 시 노출)
 if total_actual_drop > STANDARD_PRESSURE and not result_df.empty:
     st.markdown("---")
     st.markdown("### 💰 [부록] 총 배관 공사 예상 비용 추산기")
-    st.caption("🚨 기존 배관의 압력손실이 기준치를 초과하여 **관경 확대 공사가 필요**합니다. 산출된 관경별 길이에 단가를 곱하여 총 공사비를 개략적으로 추산해 보세요.")
-
     summary_df = result_df.groupby('선정관경')['관길이(m)'].sum().reset_index()
-    cost_list = [{"선정관경": r['선정관경'], "총 관길이(m)": round(r['관길이(m)'], 2), "예상단가(원/m)": default_unit_costs.get(r['선정관경'], 100000)} for _, r in summary_df.iterrows()]
-    cost_df = pd.DataFrame(cost_list)
-    
+    cost_df = pd.DataFrame([{"선정관경": r['선정관경'], "총 관길이(m)": round(r['관길이(m)'], 2), "예상단가(원/m)": default_unit_costs.get(r['선정관경'], 100000)} for _, r in summary_df.iterrows()])
     c1, c2 = st.columns([2, 1])
-    with c1:
-        edited_cost = st.data_editor(cost_df, hide_index=True, use_container_width=True)
+    with c1: edited_cost = st.data_editor(cost_df, hide_index=True, use_container_width=True)
     with c2:
         total_cost = (edited_cost['총 관길이(m)'] * edited_cost['예상단가(원/m)']).sum()
-        st.markdown("<br>", unsafe_allow_html=True)
         st.metric("💡 총 배관 공사 예상 비용", f"{int(total_cost):,} 원")
