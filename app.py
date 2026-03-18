@@ -93,7 +93,7 @@ with st.sidebar:
                 df = pd.DataFrame([["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0]], columns=input_columns)
 
     elif menu == "🤖 2. 관경 산출 고도화 (도면 AI)":
-        st.header("⚙️ AI 도면 분석기 (Gemini 1.5 Flash)")
+        st.header("⚙️ AI 도면 분석기 (Gemini Vision)")
         api_key = st.text_input("🔑 발급받은 Gemini API Key 입력", type="password")
         uploaded_pdf = st.file_uploader("도면 업로드 (PDF 한정)", type=['pdf'])
         
@@ -106,9 +106,21 @@ with st.sidebar:
                 st.session_state['reset_data'] = False
                 genai.configure(api_key=api_key)
                 
-                with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 잠시 소요될 수 있습니다..."):
+                with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 1~2분 정도 소요될 수 있습니다..."):
                     try:
-                        # 1. 임시 파일로 저장
+                        # 🚀 [핵심 추가] 작동 가능한 최신 모델을 구글 서버에서 자동 검색해서 가져옴 (404 에러 원천 차단)
+                        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                        
+                        best_model_name = 'gemini-pro' # 최후의 보루 기본값
+                        for m_name in available_models:
+                            if 'gemini-1.5-flash' in m_name:
+                                best_model_name = m_name.replace('models/', '')
+                                break
+                            elif 'gemini-1.5-pro' in m_name:
+                                best_model_name = m_name.replace('models/', '')
+                                break
+                                
+                        # 1. 대용량 파일 전용: 임시 파일로 저장
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                             tmp.write(uploaded_pdf.getvalue())
                             tmp_path = tmp.name
@@ -124,8 +136,8 @@ with st.sidebar:
                         if sample_file.state.name == "FAILED":
                             st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
                         else:
-                            # 4. 🔥안정적인 최신 범용 모델인 gemini-1.5-flash 로 교체 적용!
-                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            # 4. 자동으로 찾아낸 가장 완벽한 모델 이름으로 실행
+                            model = genai.GenerativeModel(best_model_name)
                             prompt = """
                             이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
                             결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
@@ -134,7 +146,7 @@ with st.sidebar:
                             """
                             response = model.generate_content([sample_file, prompt])
                             
-                            # 5. 응답결과 파싱 (만약 마크다운이 섞여와도 벗겨낼 수 있도록 방어코드 추가)
+                            # 5. 응답결과 파싱 방어코드 강화
                             raw_text = response.text.strip()
                             if raw_text.startswith("```json"):
                                 raw_text = raw_text[7:]
@@ -144,9 +156,9 @@ with st.sidebar:
 
                             ai_data = json.loads(raw_text)
                             st.session_state['ai_df'] = pd.DataFrame(ai_data)
-                            st.toast("✅ AI 도면 분석 성공! 데이터가 에디터에 연동되었습니다.")
+                            st.toast(f"✅ AI 도면 분석 성공! ({best_model_name} 모델 사용)")
                             
-                        # 6. 보안 파기: 서버에 올린 임시 파일 즉시 삭제
+                        # 6. 보안 파기
                         genai.delete_file(sample_file.name)
                         os.remove(tmp_path)
                         
