@@ -93,7 +93,7 @@ with st.sidebar:
                 df = pd.DataFrame([["A-B", 1740, "400P", 64.0, 0, 1, 0, 0, 0, 0]], columns=input_columns)
 
     elif menu == "🤖 2. 관경 산출 고도화 (도면 AI)":
-        st.header("⚙️ AI 도면 분석기 (Gemini 1.5 Pro)")
+        st.header("⚙️ AI 도면 분석기 (Gemini 1.5 Flash)")
         api_key = st.text_input("🔑 발급받은 Gemini API Key 입력", type="password")
         uploaded_pdf = st.file_uploader("도면 업로드 (PDF 한정)", type=['pdf'])
         
@@ -106,7 +106,7 @@ with st.sidebar:
                 st.session_state['reset_data'] = False
                 genai.configure(api_key=api_key)
                 
-                with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 1~2분 정도 소요될 수 있습니다..."):
+                with st.spinner("구글 AI가 도면(PDF)을 분석 중입니다. 파일 크기에 따라 잠시 소요될 수 있습니다..."):
                     try:
                         # 1. 임시 파일로 저장
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
@@ -124,8 +124,8 @@ with st.sidebar:
                         if sample_file.state.name == "FAILED":
                             st.error("구글 서버에서 PDF 파일을 처리하는 데 실패했습니다.")
                         else:
-                            # 4. 모델 이름 오류 수정 (gemini-1.5-pro -> gemini-1.5-pro-latest)
-                            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+                            # 4. 🔥안정적인 최신 범용 모델인 gemini-1.5-flash 로 교체 적용!
+                            model = genai.GenerativeModel('gemini-1.5-flash')
                             prompt = """
                             이 도면은 아파트 가스배관 관경산출 도면입니다. 도면의 배관 경로, 관경 텍스트(예: PE 400mm, RED 280x225 등), 부속류를 분석하여 각 구간별 물량을 추출하세요.
                             결과는 반드시 아래 JSON 배열(List of Dicts) 형태로만 반환하세요. 마크다운(` ```json `)이나 다른 설명은 절대 추가하지 마세요.
@@ -134,8 +134,14 @@ with st.sidebar:
                             """
                             response = model.generate_content([sample_file, prompt])
                             
-                            # 5. 응답결과 파싱
-                            raw_text = response.text.replace('```json', '').replace('```', '').strip()
+                            # 5. 응답결과 파싱 (만약 마크다운이 섞여와도 벗겨낼 수 있도록 방어코드 추가)
+                            raw_text = response.text.strip()
+                            if raw_text.startswith("```json"):
+                                raw_text = raw_text[7:]
+                            if raw_text.endswith("```"):
+                                raw_text = raw_text[:-3]
+                            raw_text = raw_text.strip()
+
                             ai_data = json.loads(raw_text)
                             st.session_state['ai_df'] = pd.DataFrame(ai_data)
                             st.toast("✅ AI 도면 분석 성공! 데이터가 에디터에 연동되었습니다.")
